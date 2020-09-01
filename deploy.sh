@@ -46,7 +46,7 @@ if  [ "${bucket: -1}" = "/" ]; then
 fi
 
 rm -rf src/functions/external || echo "dir 'src/functions/external' does not exists"
-rm -rf dist/*
+[ -d "dist" ] && rm -rf dist/* || mkdir dist
 
 random=$(dd if=/dev/random bs=6 count=1 2>/dev/null | od -An -tx1 | tr -d ' \t\n')
 prefix="${random}/"
