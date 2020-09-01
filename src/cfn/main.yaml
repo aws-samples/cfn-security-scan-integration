@@ -1,0 +1,377 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Import CFN-Nag / CFN-Guard findings to Security Hub  
+Parameters:
+
+  CodeCommitUrl: 
+    Description: Code commit HTTPS URL 
+    Type: String
+    AllowedPattern: ^https://git-codecommit\.[\w\.-]+\.amazonaws.com/v1/repos/[\w\.-]+
+  CodeCommitBranch:
+    Description: Branch ref, like refs/heads/master
+    Type: String
+  TemplateFolder:
+    Description: The Folder that contains your Cloud Formation templates, like cfn/ or ./
+    Type: String
+    Default: cfn/
+    MinLength: 2
+  WeightCoefficientsFail:
+    Description: Weight coeffitient for failing violations. 
+    Type: Number
+    Default: 20
+    MinValue: 0
+    MaxValue: 100
+  WeightCoefficientsWarn:
+    Description: Weight coeffitient for warning. 
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 100
+  SecurityTool:
+    Description: Static analysis tool used to scan the repository
+    Type: String
+    Default: cfn-guard
+    AllowedValues: [cfn-nag , cfn-guard]
+  FailBuild:
+    Description: Whether build should fail if findings are detected 
+    Type: String
+    AllowedValues: [true, false]
+    Default: true
+  S3BucketSources:
+    Type: String
+    Description: S3 bucket with sources 
+    MaxLength: 63
+    MinLength: 3
+    Default: awsiammedia
+  S3SourcesPrefix:
+    Type: String
+    Description: S3 prefix with sources WITH ending slash if not empty. example myprefix/
+    Default: public/sample/473_Integrating_AWS_CloudFormation_Security_Tests/
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+    - Label:
+        default: Code
+      Parameters:
+       - CodeCommitUrl
+       - CodeCommitBranch
+       - TemplateFolder 
+    - Label:
+        default: Finding 
+      Parameters:
+      - WeightCoefficientsFail
+      - WeightCoefficientsWarn  
+    - Label:
+        default: Build
+      Parameters:
+      - SecurityTool
+      - FailBuild
+    - Label:
+        default: General
+      Parameters:
+      - S3BucketSources
+      - S3SourcesPrefix
+
+    ParameterLabels:
+       CodeCommitUrl:
+           default: CodeCommit HTTPS URL
+       CodeCommitBranch:
+           default: CodeCommit branch
+       TemplateFolder:
+           default: Template folder
+       WeightCoefficientsFail:
+           default: Weight coeffitient for failing
+       WeightCoefficientsWarn:
+           default: Weight coeffitient for warning
+       FailBuild:
+           default: Fail build 
+       SecurityTool:
+           default: Security tool to scan 
+       S3BucketSources:
+         default: S3 Bucket with sources 
+       S3SourcesPrefix:
+         default: Prefix for S3 bucket with sources 
+
+Conditions:
+  ScanWithCFN_Nag: !Equals [ !Ref SecurityTool, "cfn-nag" ]
+
+Resources:
+
+# Copy the regional S3 lambda functions
+  RegionalS3Objects:
+     Type: "AWS::CloudFormation::Stack" 
+     Properties:
+        TemplateURL: !Sub "https://s3.amazonaws.com/${S3BucketSources}/${S3SourcesPrefix}copy-s3obj-to-regional-s3bucket.yaml"
+        Parameters:
+          S3BucketSources: !Ref S3BucketSources
+          S3SourcesPrefix: !Ref S3SourcesPrefix
+          S3Objects: "cfn-scan-functions.zip,main.yaml,copy-s3obj-to-regional-s3bucket.yaml"
+        Tags:
+         - Key: Name
+           Value: !Sub '${AWS::StackName}-CopyRegionalS3Bucket-NestedStack'
+
+  LambdaRole:  
+    Type: 'AWS::IAM::Role'     
+    Properties:
+      RoleName: !Sub "ImportToSecurityHubRole-${AWS::Region}"
+      Path: /
+      AssumeRolePolicyDocument:
+         Version: "2012-10-17" 
+         Statement:            
+              Effect: Allow    
+              Principal:
+                Service: "lambda.amazonaws.com" 
+              Action: "sts:AssumeRole"        
+      Policies:
+       - PolicyName: lambda     
+         PolicyDocument: 
+             Version: '2012-10-17'           
+             Statement:        
+              - Effect: Allow  
+                Action:
+                  - s3:PutObjectAcl
+                  - s3:PutObject
+                Resource: !Join 
+                  - ''
+                  - - !GetAtt ReportsS3Bucket.Arn
+                    - "/*"
+              - Effect: Allow  
+                Action:
+                  - s3:GetBucketLocation
+                Resource: !GetAtt ReportsS3Bucket.Arn
+              - Effect: Allow  
+                Action:
+                  - logs:CreateLogStream          
+                  - logs:PutLogEvents             
+                  - logs:CreateLogGroup        
+                Resource: "*"
+              - Effect: Allow  
+                Action:
+                  - securityhub:BatchUpdateFindings        
+                  - securityhub:BatchImportFindings        
+                  - securityhub:GetFindings
+                Resource: "*"
+
+  ImportToShLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Description: 'Import report to Security Hub'
+      Code:
+        S3Bucket: !GetAtt RegionalS3Objects.Outputs.RegionalS3Bucket
+        S3Key: !Sub '${S3SourcesPrefix}cfn-scan-functions.zip'
+      Handler: import_findings_security_hub.lambda_handler
+      FunctionName: ImportToSecurityHub
+      MemorySize: 128
+      Timeout: 21
+      Runtime: python3.8
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          ReportsS3Bucket: 
+            !Select [1, !Split [':::', !GetAtt ReportsS3Bucket.Arn]]
+          WeightFailing: !Ref WeightCoefficientsFail  
+          WeightWarning: !Ref WeightCoefficientsWarn
+
+  ReportsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Join
+        - "-"
+        - - 'aws-sec-build-reports'
+          - !Select
+            - 0
+            - !Split
+              - "-"
+              - !Select
+                - 2
+                - !Split
+                  - "/"
+                  - !Ref "AWS::StackId"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+
+  CodeBuildProject:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+        Name: "code-scan-example-build"
+        Source: 
+            BuildSpec: 
+              Fn::If:
+                - ScanWithCFN_Nag
+                - !Sub |
+                  version: 0.2
+                  phases:
+                    install:
+                      runtime-versions:
+                        ruby: 2.6                    
+                      commands:
+                        - export date=`date +%Y-%m-%dT%H:%M:%S.%NZ`
+                        - echo Installing cfn_nag - `pwd`
+                        - gem install cfn-nag
+                        - echo cfn_nag installation complete `date`
+                    build:
+                      commands:
+                        - echo Starting cfn scanning `date` in `pwd`
+                        - if [[ ! -d "${TemplateFolder}" ]]; then printf "\n\nTemplate folder ${TemplateFolder} does NOT exists! Fix your stack parameters.\n\n" && exit 1; fi 
+                        - mkdir report || echo "dir report exists"
+                        - SCAN_RESULT=$(cfn_nag_scan --fail-on-warnings --input-path  ${TemplateFolder} -o json > ./report/cfn_nag.out.json && echo OK || echo FAILED)
+                        - echo Completed cfn scanning `date`
+                        - echo Generating report and import to Security Hub `date`
+                        - | 
+                          source_repository=${!CODEBUILD_SRC_DIR##*/} jq  \
+                          "{ \"messageType\": \"CodeScanReport\", \"reportType\": \"CFN-NAG\", \
+                          \"createdAt\": env.date, \"source_repository\": env.source_repository, \
+                          \"source_branch\": env.CODEBUILD_SOURCE_VERSION, \
+                          \"build_id\": env.CODEBUILD_BUILD_ID, \
+                          \"source_commitid\": env.CODEBUILD_RESOLVED_SOURCE_VERSION, \
+                          \"report\": . }" ./report/cfn_nag.out.json > payload.json
+                        - aws lambda invoke --function-name ImportToSecurityHub --payload file://payload.json ./report/junit_scan_report.xml && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED"
+                        - if [[ "$FAIL_BUILD" = "true" && "$SCAN_RESULT" = "FAILED" ]]; then printf "\n\nFailiing pipeline as possible insecure configurations were detected\n\n" && exit 1; fi
+                  reports: 
+                    SecurityReports: 
+                      files: 
+                        - report/junit_scan_report.xml
+                      discard-paths: 'yes'
+                      file-format: JunitXml
+                  artifacts:
+                    files: '*'
+                - !Sub |
+                  version: 0.2
+                  phases:
+                    install:      
+                      commands:
+                        - export date=`date +%Y-%m-%dT%H:%M:%S.%NZ`
+                        - echo Installing cloudformation-guard
+                        - yum install glibc-devel gcc git make jq -y
+                        - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+                        - git clone https://github.com/aws-cloudformation/cloudformation-guard.git --depth 1 /usr/local/cloudformation-guard
+                        - source $HOME/.cargo/env
+                        - (cd /usr/local/cloudformation-guard && make )
+                        - export PATH=$PATH:/usr/local/cloudformation-guard/bin/
+                    build:
+                      commands:
+                        - echo Starting cfn-guard scanning `date` in `pwd`
+                        - if [[ ! -d "${TemplateFolder}" ]]; then printf "\n\nTemplate folder ${TemplateFolder} does NOT exists! Fix your stack parameters.\n\n" && exit 1; fi 
+                        - RULESET_PATH=/usr/local/cloudformation-guard/Examples/security_rules.ruleset
+                        - mkdir report || echo "dir report exists"
+                        - echo Generating report and import to Security Hub `date`
+                        - find ${TemplateFolder} -name "*.json" -or -name "*.yaml" > report/iterator
+                        - echo "[]" > report/final_report.json
+                        - SCAN_RESULT="OK"
+                        - |
+                         while read -r template
+                          do
+                            cfn-guard check --rule_set $RULESET_PATH --template  "$template" > ./report/template_report
+                            if [ $? -ne 0 ]; then SCAN_RESULT="FAILED"; fi
+                            if [ ! -s ./report/template_report ]; then
+                              rm ./report/template_report
+                            else
+                              jq -R "{ \"file\": \"$template\", \"message\" : select( . | contains(\"Number of failures\") | not ) } " ./report/template_report | jq -s . > ./report/template_report.json
+                              jq -s ' . | add' ./report/final_report.json ./report/template_report.json > ./report/new_report.json
+                              mv ./report/new_report.json ./report/final_report.json 
+                            fi
+                          done < report/iterator
+                        - echo Completed cfn-guard scanning `date`
+                        - | 
+                          source_repository=${!CODEBUILD_SRC_DIR##*/} jq  \
+                          "{ \"messageType\": \"CodeScanReport\", \"reportType\": \"CFN-GUARD\", \
+                          \"createdAt\": env.date, \"source_repository\": env.source_repository, \
+                          \"source_branch\": env.CODEBUILD_SOURCE_VERSION, \
+                          \"build_id\": env.CODEBUILD_BUILD_ID, \
+                          \"source_commitid\": env.CODEBUILD_RESOLVED_SOURCE_VERSION, \
+                          \"report\": . }" ./report/final_report.json > payload.json
+                        - aws lambda invoke --function-name ImportToSecurityHub --payload file://payload.json ./report/junit_scan_report.xml && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED"
+                        - if [[ "$FAIL_BUILD" = "true" && "$SCAN_RESULT" = "FAILED" ]]; then printf "\n\nFailiing pipeline as possible insecure configurations were detected\n\n" && exit 1; fi
+                  reports: 
+                    SecurityReports: 
+                      files: 
+                        - report/junit_scan_report.xml
+                      discard-paths: 'yes'
+                      file-format: JunitXml
+                  artifacts:
+                    files: '*'
+
+            Location: !Ref CodeCommitUrl
+            GitCloneDepth: 1
+            Type: "CODECOMMIT"
+        SourceVersion: !Ref CodeCommitBranch    
+        Artifacts: 
+            Type: "NO_ARTIFACTS"
+        Cache: 
+            Type: "NO_CACHE"
+        Environment: 
+            EnvironmentVariables:
+              - Name: "FAIL_BUILD"
+                Type: PLAINTEXT
+                Value: !Ref FailBuild
+            ComputeType: "BUILD_GENERAL1_SMALL"
+            Image: "aws/codebuild/amazonlinux2-x86_64-standard:3.0"
+            ImagePullCredentialsType: "CODEBUILD"
+            PrivilegedMode: false
+            Type: "LINUX_CONTAINER"
+        ServiceRole: !GetAtt CodeBuildRole.Arn
+        TimeoutInMinutes: 60
+        QueuedTimeoutInMinutes: 480
+        EncryptionKey: !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3"
+        BadgeEnabled: false
+        LogsConfig: 
+            CloudWatchLogs: 
+                Status: "ENABLED"
+            S3Logs: 
+                Status: "DISABLED"
+                EncryptionDisabled: false
+
+  CodeBuildRole:  
+    Type: 'AWS::IAM::Role'     
+    Properties:
+      RoleName: !Sub "SecurityScanCodeBuildRole-${AWS::Region}"
+      Path: /
+      AssumeRolePolicyDocument:
+         Version: "2012-10-17" 
+         Statement:            
+              Effect: Allow    
+              Principal:
+                Service: codebuild.amazonaws.com
+              Action: "sts:AssumeRole"        
+      Policies:
+       - PolicyName: codebuild-demo-service-role     
+         PolicyDocument: 
+             Version: '2012-10-17'           
+             Statement:        
+              - Effect: Allow  
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ImportToShLambda.Arn
+              - Effect: Allow  
+                Action:
+                  - logs:CreateLogStream          
+                  - logs:PutLogEvents             
+                  - logs:CreateLogGroup        
+                Resource: "*"
+              - Effect: Allow  
+                Action:
+                  - codebuild:CreateReportGroup        
+                  - codebuild:CreateReport 
+                  - codebuild:UpdateReport       
+                  - codebuild:BatchPutTestCases
+                Resource: !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*SecurityReports"
+              - Effect: Allow  
+                Action:
+                  - codecommit:gitPull
+                Resource: !Join
+                             - ""
+                             - - !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:"
+                               - !Select [ 5, !Split ['/', !Ref CodeCommitUrl ]] 

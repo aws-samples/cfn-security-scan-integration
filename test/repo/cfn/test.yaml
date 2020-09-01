@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Dummy test
+Parameters:
+
+  OrgScope: 
+    Description: Alphanumeric/hyphenated Organisational Scope. Used for tagging/naming. 
+    Type: String
+  FunctionalScope: 
+    Description: Alphanumeric/hyphenated Functional Scope. Used for tagging/naming. 
+    Type: String
+  Environment: 
+    Description: Environment Name. Used for tagging/naming. 
+    Type: String
+  ModuleName:  
+    Description: Name of module 
+    Type: String
+
+Resources:
+
+  LambdaRole:  
+    Type: 'AWS::IAM::Role'     
+    Properties:
+      RoleName: !Sub rle.${OrgScope}.${FunctionalScope}.${ModuleName}-lambda.${Environment} 
+      Path: /
+      AssumeRolePolicyDocument:
+         Version: "2012-10-17" 
+         Statement:            
+              Effect: Allow    
+              Principal:
+                Service: "lambda.amazonaws.com" 
+              Action: "sts:AssumeRole"        
+      Policies:
+       - PolicyName: lambda-sec-IR     
+         PolicyDocument:       
+             Version: '2012-10-17'           
+             Statement:        
+              - Effect: Allow  
+                Action:
+                  - logs:CreateLogStream          
+                  - logs:PutLogEvents             
+                  - logs:*          
+                Resource: "*"
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+    DeletionPolicy: Retain
+
+  PublicAlbSecurityGroupHttpIngress:
+    Properties:
+      CidrIp: 0.0.0.0/0
+      FromPort: 80
+      GroupId: sg-123231122
+      IpProtocol: tcp
+      ToPort: 80
+    Type: AWS::EC2::SecurityGroupIngress
+Outputs:
+
+  LambdaRoleArn:
+    Value: !GetAtt LambdaRole.Arn
+    Description: Role Arn

@@ -1,0 +1,11 @@
+PARAMETERS=(
+  "CodeCommitUrl=https://git-codecommit.eu-west-2.amazonaws.com/v1/repos/code-sample"
+  "CodeCommitBranch=refs/heads/master"
+  "SecurityTool=cfn-nag"
+  "FailBuild=false"
+  "TemplateFolder=cfn/"
+  "WeightCoefficientsFail=20"
+  "WeightCoefficientsWarn=1"
+  "S3BucketSources={S3BucketSources}"
+  "S3SourcesPrefix={S3SourcesPrefix}"
+)
