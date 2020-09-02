@@ -19,7 +19,7 @@ Parameters:
   S3SourcesPrefix:
     Type: String
     Description: S3 prefix with sources WITH ending slash  
-    MaxLength: 63
+    MaxLength: 128
     MinLength: 3
     Default: prefix
 
