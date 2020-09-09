@@ -21,7 +21,7 @@ From your terminal application, execute the following command:
 
 `git clone git@github.com:aws-samples/cfn-security-scan-integration.git`
 
-### Step 2. Create S3 bucket for artifacts in sougitrce account
+### Step 2. Create S3 bucket for artifacts in source account
 
 Create a S3 bucket where the artifacts will be uploaded. Your AWS CLI selected profile must have read/write permission to the bucket. It can be in the different region from the region you choose to deploy the solution. 
 
